@@ -1,16 +1,12 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
+const axios = require('axios'); // Used to communicate with your Python ML Service
 const Doctor = require('../models/Doctor');
 
+// 1. Setup Google AI (Gemini 2.5 Flash)
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });
 
-// 1. Define your Priority List (Best to Fastest)
-const MODELS = [
-    
-  "gemini-2.5-flash", 
-  "gemini-3-flash-preview",  
-  "gemini-2.5-flash-lite"
-];
-
+// 2. Allowed Specialties (Must match your Database/Excel)
 const ALLOWED_SPECIALTIES = [
   "Ophthalmology", "Oncology", "General Surgery", "Pediatrics",
   "Gastroenterology", "Psychiatry", "ENT", "Gynecology",
@@ -18,81 +14,123 @@ const ALLOWED_SPECIALTIES = [
   "Nephrology", "Cardiology", "Urology"
 ];
 
-// Helper Function: Try models one by one
-async function getAIResponse(prompt) {
-  for (const modelName of MODELS) {
-    try {
-      console.log(`🤖 Trying model: ${modelName}...`);
-      const model = genAI.getGenerativeModel({ model: modelName });
-      
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      const text = response.text();
-      
-      return { text, modelUsed: modelName }; // Success! Return immediately.
-    } catch (error) {
-      console.warn(`⚠️ ${modelName} failed. Switching to next...`);
-      // Loop continues to the next model automatically
-    }
-  }
-  throw new Error("All AI models failed.");
-}
-
 const analyzeSymptoms = async (req, res) => {
   const { symptoms, userLocation } = req.body;
 
-  if (!symptoms) return res.status(400).json({ message: "Symptoms required" });
+  if (!symptoms) {
+    return res.status(400).json({ message: "Symptoms are required" });
+  }
 
   try {
+    console.log(`\n🔎 Analysis Request: "${symptoms}"`);
+
+    // --- STEP A: Ask Generative AI (LLM) ---
+    // This is your primary "Brain"
     const prompt = `
-      Act as a medical triage API. Input: "${symptoms}".
-      Task: Output JSON identifying the best specialty from: ${ALLOWED_SPECIALTIES.join(", ")}.
-      Rules: Return ONLY raw JSON. No markdown.
-      Format: { "specialty": "...", "reasoning": "...", "urgency": "Low/Medium/High" }
+      Act as a medical triage API. 
+      Input: "${symptoms}".
+      Task: Output a JSON object identifying the best medical specialty from this list: ${ALLOWED_SPECIALTIES.join(", ")}.
+      
+      Rules:
+      - If unsure, use "General Medicine".
+      - Return ONLY raw JSON. No markdown.
+      
+      Format:
+      { "specialty": "...", "reasoning": "...", "urgency": "Low/Medium/High" }
     `;
 
-    // 2. Call the Multi-Model Handler
-    const { text, modelUsed } = await getAIResponse(prompt);
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const text = response.text().replace(/```json/g, '').replace(/```/g, '').trim();
     
-    // Clean and Parse
-    const cleanJson = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    const aiResponse = JSON.parse(cleanJson);
+    let aiResponse;
+    try {
+      aiResponse = JSON.parse(text);
+    } catch (e) {
+      // Fallback if LLM returns bad JSON
+      aiResponse = { specialty: "General Medicine", reasoning: "Complex input pattern.", urgency: "Low" };
+    }
     
-    console.log(`✅ Success using [${modelUsed}]:`, aiResponse.specialty);
+    console.log(`🤖 LLM Diagnosis: ${aiResponse.specialty}`);
 
-    // 3. Database Search (Standard Logic)
+
+    // --- STEP B: Ask Predictive AI (Python ML Model) ---
+    // This is your "Validator" or "Second Opinion"
+    let mlResponse = null;
+    try {
+      // 1. Construct "Enriched Input"
+      // If AI reasoning exists, append it. Otherwise just use symptoms.
+      const enrichedText = aiResponse.reasoning 
+        ? `${symptoms}. ${aiResponse.reasoning}` 
+        : symptoms;
+
+      console.log(`\n🚀 Sending Enriched Text to ML: "${enrichedText.substring(0, 60)}..."`);
+
+      // 2. Send to Python
+      const pythonRes = await axios.post('http://localhost:5001/predict', {
+        symptoms: enrichedText 
+      });
+      
+      mlResponse = pythonRes.data;
+      console.log(`🐍 ML Validation: ${mlResponse.specialty} (Confidence: ${(mlResponse.confidence * 100).toFixed(1)}%)`);
+      
+    } catch (err) {
+      console.log("⚠️ Python ML Service unavailable. Skipping validation.");
+    }
+
+
+    // --- STEP C: Compare Results (The "Hybrid" Logic) ---
+    let validationMsg = "Diagnosis provided by Generative AI.";
+    
+    if (mlResponse) {
+      if (mlResponse.specialty === aiResponse.specialty) {
+        validationMsg = "✅ Strong Consensus: Both AI models agree.";
+      } else {
+        validationMsg = `⚠️ Divergence: ML Model suggested ${mlResponse.specialty}. Review recommended.`;
+      }
+    }
+
+
+    // --- STEP D: Database Search ---
+    // We prioritize the LLM's choice as it understands context better
     if (!ALLOWED_SPECIALTIES.includes(aiResponse.specialty)) {
       aiResponse.specialty = "General Medicine";
     }
 
     let doctors = [];
-    if (aiResponse.specialty) {
-      const query = { specialty: aiResponse.specialty };
-      if (userLocation && userLocation.lat) {
-        doctors = await Doctor.find({
-          specialty: aiResponse.specialty,
-          location: {
-            $near: {
-              $geometry: { type: "Point", coordinates: [userLocation.lng, userLocation.lat] },
-              $maxDistance: 10000 
-            }
+    const query = { specialty: aiResponse.specialty };
+
+    if (userLocation && userLocation.lat) {
+      doctors = await Doctor.find({
+        specialty: aiResponse.specialty,
+        location: {
+          $near: {
+            $geometry: { type: "Point", coordinates: [userLocation.lng, userLocation.lat] },
+            $maxDistance: 10000 // 10km radius
           }
-        }).limit(5);
-      } else {
-        doctors = await Doctor.find(query).limit(5);
-      }
+        }
+      }).limit(5);
+    } else {
+      doctors = await Doctor.find(query).limit(5);
     }
 
-    // 4. Send Response (Bonus: Tell frontend which model did the work!)
+
+    // --- STEP E: Send Final Response ---
     res.json({
-      analysis: aiResponse,
-      doctors: doctors,
-      meta: { modelUsed } // Useful for debugging/presentation
+      analysis: {
+        ...aiResponse,
+        validation: validationMsg, // Display this in your frontend for extra marks!
+        ml_data: mlResponse // Optional: Send raw ML data for debugging
+      },
+      doctors: doctors
     });
 
   } catch (error) {
-    console.error("❌ System Error:", error.message);
-    res.status(500).json({ message: "Service Unavailable", error: error.message });
+    console.error("❌ Controller Error:", error);
+    res.status(500).json({ 
+      message: "Analysis Service Failed", 
+      error: error.message 
+    });
   }
 };
 
