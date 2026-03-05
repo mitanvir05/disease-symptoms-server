@@ -2,9 +2,9 @@
 PORT=5000
 
 # 2. Database Connection 
-MONGO_URI=mongodb+srv://tanvircse05_db_user:1Zv7LKGANEwpunEN@cluster0.cts6opq.mongodb.net/?appName=Cluster0
+MONGO_URI=mongodb+srv://tanvircse05_db_user:1Zv7LKGANEwpunEN@cluster0.cts6opq.mongodb.net/medical_app?appName=Cluster0
 
 # 3. AI Service Configuration 
 
-GROQ_API_KEY=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
-GEMINI_API_KEY=AIzaSyD_v7nLbZ78HYUSH0fr8BtqK1j-zTyjUOU
+GROQ_API_KEY=gsk_ph9NfG6YpTn0xP6LH2V7WGdyb3FYemHf8uzmUo3KrxhCf2FPGMKrdelete
+GEMINI_API_KEY=AIzaSyDaIU_gfc5OIZz1Za22Uf3YWI9PHfUbqiIdelete
