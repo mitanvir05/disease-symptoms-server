@@ -2,7 +2,7 @@
 PORT=5000
 
 # 2. Database Connection 
-MONGO_URI=mongodb://localhost:27017/thesis-app
+MONGO_URI=mongodb+srv://tanvircse05_db_user:1Zv7LKGANEwpunEN@cluster0.cts6opq.mongodb.net/?appName=Cluster0
 
 # 3. AI Service Configuration 
 
