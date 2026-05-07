@@ -163,7 +163,7 @@ const analyzeSymptoms = async (req, res) => {
               type: "Point",
               coordinates: [userLocation.lng, userLocation.lat],
             },
-            $maxDistance: 100000,
+            $maxDistance: 1000000,
           },
         },
       }).limit(5);
